@@ -11,7 +11,9 @@ import time
 from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
+import accelerate
 
+import k_diffusion as K
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
@@ -40,6 +42,18 @@ def load_model_from_config(config, ckpt, verbose=False):
     model.cuda()
     model.eval()
     return model
+
+class CFGDenoiser(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.inner_model = model
+
+    def forward(self, x, sigma, uncond, cond, cond_scale):
+        x_in = torch.cat([x] * 2)
+        sigma_in = torch.cat([sigma] * 2)
+        cond_in = torch.cat([uncond, cond])
+        uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
+        return uncond + (cond - uncond) * cond_scale
 
 
 def main():
@@ -176,24 +190,33 @@ def main():
     )
     opt = parser.parse_args()
 
+    accelerator = accelerate.Accelerator()
+    device = accelerator.device
+    seed_everything(opt.seed)
+    seeds = torch.randint(-2 ** 63, 2 ** 63 - 1, [accelerator.num_processes])
+    torch.manual_seed(seeds[accelerator.process_index].item())
+    
     if opt.laion400m:
         print("Falling back to LAION 400M model...")
         opt.config = "configs/latent-diffusion/txt2img-1p4B-eval.yaml"
         opt.ckpt = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
 
-    seed_everything(opt.seed)
+    # seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model = model.to(device)
+    # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    # model = model.to(device)
 
     if opt.plms:
         sampler = PLMSSampler(model)
     else:
         sampler = DDIMSampler(model)
+        
+    model_wrap = K.external.CompVisDenoiser(model)
+    sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -226,8 +249,8 @@ def main():
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    for prompts in tqdm(data, desc="data"):
+                for n in trange(opt.n_iter, desc="Sampling", disable =not accelerator.is_main_process):
+                    for prompts in tqdm(data, desc="data", disable=not accelerator.is_main_process):
                         uc = None
                         if opt.scale != 1.0:
                             uc = model.get_learned_conditioning(batch_size * [""])
@@ -235,30 +258,37 @@ def main():
                             prompts = list(prompts)
                         c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                         conditioning=c,
-                                                         batch_size=opt.n_samples,
-                                                         shape=shape,
-                                                         verbose=False,
-                                                         unconditional_guidance_scale=opt.scale,
-                                                         unconditional_conditioning=uc,
-                                                         eta=opt.ddim_eta,
-                                                         x_T=start_code)
+                        # samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                         #                                conditioning=c,
+                          #                               batch_size=opt.n_samples,
+                           #                              shape=shape,
+                            #                             verbose=False,
+                             #                            unconditional_guidance_scale=opt.scale,
+                              #                           unconditional_conditioning=uc,
+                               #                          eta=opt.ddim_eta,
+                                #                         x_T=start_code)
 
+                        sigmas = model_wrap.get_sigmas(opt.ddim_steps)
+                        # sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min, sigma_max, device=device)
+                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0]
+                        model_wrap_cfg = CFGDenoiser(model_wrap)
+                        extra_args = {'cond': c, 'uncond': uc, 'cond_scale': opt.scale}
+                        samples_ddim = K.sampling.sample_lms(model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                        x_samples_ddim = accelerator.gather(x_samples_ddim)                        
 
-                        if not opt.skip_save:
+                        if accelerator.is_main_process and not opt.skip_save:
                             for x_sample in x_samples_ddim:
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 Image.fromarray(x_sample.astype(np.uint8)).save(
                                     os.path.join(sample_path, f"{base_count:05}.png"))
                                 base_count += 1
 
-                        if not opt.skip_grid:
+                        if accelerator.is_main_process and not opt.skip_grid:
                             all_samples.append(x_samples_ddim)
 
-                if not opt.skip_grid:
+                if accelerator.is_main_process and not opt.skip_grid:
                     # additionally, save as grid
                     grid = torch.stack(all_samples, 0)
                     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
@@ -270,7 +300,7 @@ def main():
                     grid_count += 1
 
                 toc = time.time()
-
+if accelerator.is_main_process:
     print(f"Your samples are ready and waiting for you here: \n{outpath} \n"
           f" \nEnjoy.")
 
