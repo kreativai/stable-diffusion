@@ -160,6 +160,11 @@ def main():
         help="unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
     )
     parser.add_argument(
+        "--dyn",
+        type=float,
+        help="dynamic thresholding from Imagen, in latent space (TODO: try in pixel space with intermediate decode)",
+    )
+    parser.add_argument(
         "--from-file",
         type=str,
         help="if specified, load prompts from this file",
@@ -267,7 +272,8 @@ def main():
                              #                            unconditional_guidance_scale=opt.scale,
                               #                           unconditional_conditioning=uc,
                                #                          eta=opt.ddim_eta,
-                                #                         x_T=start_code)
+                                #                         x_T=start_code,
+                                 #                        dynamic_threshold=opt.dyn)
 
                         sigmas = model_wrap.get_sigmas(opt.ddim_steps)
                         torch.manual_seed(opt.seed) # changes manual seeding procedure
