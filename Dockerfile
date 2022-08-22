@@ -16,6 +16,7 @@ RUN apt-get update \
     && apt-get install -y ffmpeg libsm6 libxext6
 
 RUN pip install diffusers==0.2.4 transformers scipy ftfy
+RUN pip install torch==1.12.1 torchvision==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu113
 RUN python3 -m pip install huggingface_hub
 
 RUN mkdir Stable
@@ -25,4 +26,4 @@ COPY hugging_run.py Stable/
 
 WORKDIR Stable
 
-#ENTRYPOINT ["python3", "hugging_run.py"]
+ENTRYPOINT ["python3", "hugging_run.py"]
