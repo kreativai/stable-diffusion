@@ -15,15 +15,14 @@ RUN apt-get update \
     && apt-get install -y zip \
     && apt-get install -y ffmpeg libsm6 libxext6
 
-RUN pip3 install -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
-RUN pip3 install git+https://github.com/openai/CLIP.git
-RUN pip3 install git+https://github.com/crowsonkb/k-diffusion/
+RUN pip install diffusers==0.2.4 transformers scipy ftfy
+RUN python3 -m pip install huggingface_hub
 
 RUN mkdir Stable
-COPY ./ Stable/
+
+COPY token.txt Stable/
+COPY hugging_run.py Stable/
 
 WORKDIR Stable
-RUN pip3 install -r requirements.txt
 
-ENTRYPOINT ["python3", "scripts/txt2img_k.py", "--prompt", "\"beautiful clean oil painting portrait of jesus by rafael albuquerque, wayne barlowe, rembrandt, complex, stunning, realistic\"", "--ckpt", "./sd-v1-3-full-ema.ckpt", "--n_samples", "3", "--n_iter", "1", "--ddim_steps", "50", "--H", "512", "--W", "512", "--seed", "2815820077"]
-
+#ENTRYPOINT ["python3", "hugging_run.py"]
